@@ -1,0 +1,6 @@
+{
+  "appId": "ir.shadfar.hesabdari",
+  "appName": "حسابدار من",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
