@@ -5,10 +5,12 @@ import {
   Trash2, Grid3x3, PieChart as PieChartIcon, Home as HomeIcon,
   Tag, Check, Star, CreditCard, Lock, Sun, Moon, Image as ImageIcon,
   Repeat, Download, Upload, Bitcoin, Landmark as Bank, CalendarDays,
-  BellRing, FileSpreadsheet, Printer, Users, ShieldCheck, Palette, Save
+  BellRing, FileSpreadsheet, Printer, Users, ShieldCheck, Palette, Save,
+  Eye, EyeOff, StickyNote, Mic, MicOff, LayoutGrid, LayoutList, ArrowUp, ArrowDown,
+  DollarSign, RefreshCw, Sparkles, Type, Target
 } from "lucide-react";
 import {
-  PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip,
+  PieChart, Pie, Cell, Sector, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip,
   LineChart, Line, CartesianGrid
 } from "recharts";
 import * as XLSX from "xlsx";
@@ -86,15 +88,38 @@ function getJalaliMonthCells(jYear, jMonth) {
 }
 
 function parseBankSms(text) {
-  // Best-effort parser for common Iranian bank SMS wording. Not real SMS access —
-  // the user pastes the message text and we extract what we can.
+  // Best-effort parser for free text (pasted bank SMS, typed note, or voice transcript).
+  // Not real SMS/AI access — just keyword + number matching done locally on the device.
   const normalized = text.replace(/[۰-۹]/g, (d) => "0123456789"["۰۱۲۳۴۵۶۷۸۹".indexOf(d)]).replace(/,/g, "");
-  const amountMatch = normalized.match(/(\d{4,})/);
+  const amountMatch = normalized.match(/(\d{3,})/);
   const amount = amountMatch ? parseInt(amountMatch[1], 10) : null;
   let type = "expense";
-  if (/واریز|دریافت|credit|deposit/i.test(text)) type = "income";
-  if (/برداشت|خرید|انتقال|پرداخت|debit|purchase/i.test(text)) type = "expense";
-  return { amount, type, note: text.trim().slice(0, 140) };
+  if (/واریز|دریافت|حقوق|credit|deposit|income/i.test(text)) type = "income";
+  if (/برداشت|خرید|انتقال|پرداخت|هزینه|debit|purchase|expense/i.test(text)) type = "expense";
+  const CATEGORY_HINTS = [
+    { re: /بنزین|سوخت|پمپ/, name: "بنزین" },
+    { re: /رستوران|غذا|بازار|خرید خوراک|سوپرمارکت/, name: "خوراک و بازار" },
+    { re: /قبض|آب|برق|گاز|اینترنت|شارژ/, name: "قبوض" },
+    { re: /تاکسی|اتوبوس|مترو|حمل/, name: "حمل و نقل" },
+    { re: /دارو|دکتر|درمان|بیمارستان/, name: "درمان" },
+    { re: /حقوق|maaش/, name: "حقوق" },
+  ];
+  const hint = CATEGORY_HINTS.find((h) => h.re.test(text));
+  return { amount, type, note: text.trim().slice(0, 140), categoryHint: hint?.name };
+}
+
+// Currency display: base unit stored everywhere internally is always Rial.
+// This only affects how numbers are *shown*, so data entry / storage stays consistent.
+// usdRialRate = how many Rials one US Dollar costs right now (from the live rates widget,
+// or the manual value the user entered in Settings if the live fetch didn't work).
+function formatMoney(amount, currency, usdRialRate) {
+  const n = Number(amount || 0);
+  if (currency === "toman") return `${toFaInt(Math.round(n / 10))} تومان`;
+  if (currency === "usd") {
+    if (!usdRialRate) return `${toFaInt(n)} ریال`; // no rate yet, fall back to Rial rather than guess
+    return `$${(n / usdRialRate).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+  }
+  return `${toFaInt(n)} ریال`;
 }
 
 function resizeImage(file, maxSize = 480) {
@@ -137,7 +162,19 @@ const seedCategories = () => ([
   { id: uid(), name: "حقوق", kind: "income" },
   { id: uid(), name: "درآمد متفرقه", kind: "income" },
 ]);
-const seedSettings = () => ({ theme: "light", pin: "", sharedFamily: false, themeColor: "purple", profile: { name: "alireza shadfar", phone: "", email: "" } });
+const DEFAULT_HOME_SECTIONS = [
+  { key: "shortcut", visible: true }, { key: "expense", visible: true }, { key: "income", visible: true },
+  { key: "banks", visible: true }, { key: "funds", visible: true }, { key: "balrep", visible: true },
+  { key: "budget", visible: true }, { key: "loanchk", visible: true }, { key: "bills", visible: true },
+];
+const seedSettings = () => ({
+  theme: "light", pin: "", sharedFamily: false, themeColor: "purple",
+  profile: { name: "alireza shadfar", phone: "", email: "" },
+  homeLayout: "cards", homeSections: DEFAULT_HOME_SECTIONS,
+  fontScale: 1, calendarMode: "jalali", currency: "rial",
+  checkReminderDays: 7, smsNotif: false,
+  aiProvider: "none", aiApiKey: "", manualUsdRate: "",
+});
 
 /* ---------------------------------------------------------
    Theme / palette
@@ -210,6 +247,211 @@ function GaugeCircle({ value, max, color, label }) {
   );
 }
 
+/* ---------------------------------------------------------
+   Exploding / stylized pie chart — click a slice to pop it out
+   a little and see its label. Recharts doesn't do true 3D, so
+   "3D" here means a soft drop-shadow + slightly thicker ring to
+   give it some depth rather than a flat chart.
+--------------------------------------------------------- */
+function renderExplodingSlice(props) {
+  const { cx, cy, innerRadius, outerRadius, startAngle, endAngle, fill, payload, isActive } = props;
+  const RADIAN = Math.PI / 180;
+  const midAngle = (startAngle + endAngle) / 2;
+  const offset = isActive ? 14 : 0;
+  const ox = Math.cos(-midAngle * RADIAN) * offset;
+  const oy = Math.sin(-midAngle * RADIAN) * offset;
+  return (
+    <g transform={`translate(${ox},${oy})`} style={{ filter: "drop-shadow(0px 3px 4px rgba(0,0,0,0.35))" }}>
+      <Sector cx={cx} cy={cy} innerRadius={innerRadius} outerRadius={isActive ? outerRadius + 6 : outerRadius}
+        startAngle={startAngle} endAngle={endAngle} fill={fill} stroke="#fff" strokeWidth={2} />
+    </g>
+  );
+}
+function ExplodingPie({ data, height = 220, currency, usdRate }) {
+  const t = useT();
+  const [active, setActive] = useState(null);
+  if (!data || data.length === 0) return <EmptyRow text="داده‌ای برای نمایش نیست" />;
+  const item = active != null ? data[active] : null;
+  return (
+    <div>
+      <ResponsiveContainer width="100%" height={height}>
+        <PieChart>
+          <Pie data={data} dataKey="amount" nameKey="name" innerRadius={height * 0.16} outerRadius={height * 0.36}
+            paddingAngle={2}
+            onClick={(_, i) => setActive(active === i ? null : i)}
+            shape={(props) => renderExplodingSlice({ ...props, isActive: active === props.index })}>
+            {data.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} cursor="pointer" />)}
+          </Pie>
+        </PieChart>
+      </ResponsiveContainer>
+      <div style={{ textAlign: "center", minHeight: 20, fontSize: 13, fontWeight: 700, color: item ? PIE_COLORS[active % PIE_COLORS.length] : t.sub }}>
+        {item ? `${item.name} — ${formatMoney(item.amount, currency, usdRate)}` : "برای جزئیات روی هر بخش بزن"}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginTop: 8 }}>
+        {data.map((d, i) => (
+          <span key={i} onClick={() => setActive(active === i ? null : i)} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: t.sub, cursor: "pointer" }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: PIE_COLORS[i % PIE_COLORS.length] }} />
+            {d.name}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Half-circle speedometer gauge — e.g. check collection ratio
+--------------------------------------------------------- */
+function GaugeSpeedometer({ pct, label, colorFrom = "#B01E4A", colorTo = "#1E8449" }) {
+  const t = useT();
+  const size = 200, stroke = 16;
+  const cx = size / 2, cy = size / 2 + 10, r = size / 2 - stroke;
+  const clamped = Math.max(0, Math.min(100, pct));
+  const angle = -180 + (clamped / 100) * 180; // -180 (left) .. 0 (right)
+  const rad = (angle * Math.PI) / 180;
+  const needleX = cx + r * 0.86 * Math.cos(rad);
+  const needleY = cy + r * 0.86 * Math.sin(rad);
+  const arc = (startDeg, endDeg, color) => {
+    const s = (startDeg * Math.PI) / 180, e = (endDeg * Math.PI) / 180;
+    const x1 = cx + r * Math.cos(s), y1 = cy + r * Math.sin(s);
+    const x2 = cx + r * Math.cos(e), y2 = cy + r * Math.sin(e);
+    const large = endDeg - startDeg > 180 ? 1 : 0;
+    return <path d={`M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`} stroke={color} strokeWidth={stroke} fill="none" strokeLinecap="round" />;
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <svg width={size} height={size / 2 + 30}>
+        {arc(-180, 0, t.border)}
+        {arc(-180, angle, clamped >= 60 ? colorTo : clamped >= 30 ? "#C56A1F" : colorFrom)}
+        <line x1={cx} y1={cy} x2={needleX} y2={needleY} stroke={t.text} strokeWidth={3} strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r={7} fill={t.text} />
+      </svg>
+      <div style={{ fontSize: 20, fontWeight: 800, color: t.text, marginTop: -6 }}>{toFaInt(Math.round(clamped))}٪</div>
+      <div style={{ fontSize: 12.5, color: t.sub, fontWeight: 600 }}>{label}</div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Bank card carousel — swipeable, with a show/hide-balance eye
+--------------------------------------------------------- */
+function BankCard({ account, balance, hidden, currency, usdRate }) {
+  const last4 = account.cardNumberLast4 || account.id.slice(-4).toUpperCase();
+  return (
+    <div style={{
+      minWidth: 300, maxWidth: 300, height: 176, borderRadius: 18, padding: 20, color: "#fff", flexShrink: 0,
+      background: `linear-gradient(135deg, ${BRAND.violet}, ${BRAND.header})`,
+      boxShadow: "0 6px 16px rgba(0,0,0,0.25)", display: "flex", flexDirection: "column", justifyContent: "space-between",
+      scrollSnapAlign: "center", position: "relative", overflow: "hidden"
+    }}>
+      <div style={{ position: "absolute", top: -40, left: -40, width: 140, height: 140, borderRadius: "50%", background: "rgba(255,255,255,0.08)" }} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", zIndex: 1 }}>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>{account.name}</div>
+        <div style={{ width: 34, height: 24, borderRadius: 6, background: "linear-gradient(135deg,#f5d98b,#c9a94a)" }} />
+      </div>
+      <div style={{ fontSize: 17, letterSpacing: 3, fontWeight: 700, zIndex: 1, direction: "ltr", textAlign: "left" }}>
+        •••• •••• •••• {last4}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", zIndex: 1 }}>
+        <div style={{ fontSize: 11, opacity: 0.8 }}>{account.type === "card" ? "کارت" : "بانک"}</div>
+        <div style={{ fontSize: 15, fontWeight: 800 }}>{hidden ? "••••••••" : formatMoney(balance, currency, usdRate)}</div>
+      </div>
+    </div>
+  );
+}
+function BankCardCarousel({ accounts, accountBalance, currency, usdRate }) {
+  const [hidden, setHidden] = useState(false);
+  const cards = accounts.filter((a) => a.type === "bank" || a.type === "card");
+  if (cards.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", padding: "0 4px 6px" }}>
+        <button onClick={() => setHidden((v) => !v)} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+          {hidden ? <EyeOff size={15} /> : <Eye size={15} />} {hidden ? "نمایش موجودی" : "مخفی کردن موجودی"}
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 12, overflowX: "auto", scrollSnapType: "x mandatory", paddingBottom: 4, paddingInline: 2 }}>
+        {cards.map((a) => <BankCard key={a.id} account={a} balance={accountBalance(a.id)} hidden={hidden} currency={currency} usdRate={usdRate} />)}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Today box: date + quick note / reminder buttons
+--------------------------------------------------------- */
+function DateQuickBox({ onNote, onReminder }) {
+  return (
+    <div style={{ background: "rgba(255,255,255,0.14)", borderRadius: 14, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ color: "#fff", fontSize: 13, fontWeight: 700 }}>{faLongDate(new Date())}</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onNote} style={quickPillBtn}><StickyNote size={13} /> یادداشت</button>
+        <button onClick={onReminder} style={quickPillBtn}><BellRing size={13} /> یادآوری</button>
+      </div>
+    </div>
+  );
+}
+const quickPillBtn = { display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.22)", border: "none", color: "#fff", borderRadius: 20, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" };
+
+/* ---------------------------------------------------------
+   Income/Expense day widget — day navigation + smile/frown arc
+   + an exploding pie of that day's categories
+--------------------------------------------------------- */
+function SmileFrownArc({ income, expense }) {
+  const w = 180, h = 70, cx = w / 2, cy = 8;
+  const r = 60;
+  let path, color;
+  if (income > expense) { path = `M ${cx - r} ${cy} A ${r} ${r} 0 0 0 ${cx + r} ${cy}`; color = BRAND.darkgreen; }
+  else if (expense > income) { path = `M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`; color = BRAND.crimson; }
+  else { path = `M ${cx - r} ${cy} L ${cx + r} ${cy}`; color = BRAND.crimson; }
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+      <path d={path + ` L ${cx + r} ${cy} Z`} fill={color} opacity={0.85} />
+    </svg>
+  );
+}
+function IncomeExpenseDayWidget({ day, setDay, transactions, catById, currency, usdRate }) {
+  const t = useT();
+  const dayTx = transactions.filter((tx) => tx.date === day);
+  const income = dayTx.filter((tx) => tx.type === "income").reduce((s, tx) => s + tx.amount, 0);
+  const expense = dayTx.filter((tx) => tx.type === "expense").reduce((s, tx) => s + tx.amount, 0);
+  const net = income - expense;
+  const pieData = useMemo(() => {
+    const map = {};
+    dayTx.filter((tx) => tx.type !== "transfer").forEach((tx) => {
+      const name = catById(tx.categoryId)?.name || "—";
+      map[name] = (map[name] || 0) + tx.amount;
+    });
+    return Object.entries(map).map(([name, amount]) => ({ name, amount }));
+  }, [dayTx, catById]);
+  return (
+    <div style={{ background: t.card, borderRadius: 16, padding: 16, marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <button onClick={() => setDay(addDays(day, -1))} style={navArrowStyle(t)}><ChevronRight size={16} /></button>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: t.sub }}>{faLongDate(new Date(day))}</div>
+        <button onClick={() => setDay(addDays(day, 1))} style={navArrowStyle(t)}><ChevronLeft size={16} /></button>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 10 }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 11, color: t.sub }}>درآمد</div>
+          <div style={{ fontWeight: 800, color: BRAND.darkgreen, fontSize: 14 }}>{formatMoney(income, currency, usdRate)}</div>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <SmileFrownArc income={income} expense={expense} />
+          <div style={{ fontWeight: 800, fontSize: 15, color: net >= 0 ? BRAND.darkgreen : BRAND.crimson, marginTop: -4 }}>{formatMoney(Math.abs(net), currency, usdRate)}</div>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 11, color: t.sub }}>هزینه</div>
+          <div style={{ fontWeight: 800, color: BRAND.crimson, fontSize: 14 }}>{formatMoney(expense, currency, usdRate)}</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <ExplodingPie data={pieData} height={190} currency={currency} usdRate={usdRate} />
+      </div>
+    </div>
+  );
+}
+
 function CollapsibleSection({ color, title, open, onToggle, children, badge }) {
   const t = useT();
   return (
@@ -277,16 +519,48 @@ function useStyles() {
 /* ---------------------------------------------------------
    Header + BottomNav
 --------------------------------------------------------- */
-function Header({ title = "alireza shadfar", onMenu, back, onBack }) {
+function Header({ title = "alireza shadfar", onMenu, back, onBack, onMic }) {
   return (
-    <div style={{ background: BRAND.header, color: "#fff", padding: "16px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 20 }}>
+    <div style={{ background: BRAND.header, color: "#fff", padding: "calc(env(safe-area-inset-top, 0px) + 14px) 16px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 20 }}>
       {back ? <button onClick={onBack} style={iconBtn}><ChevronRight size={24} /></button> : <Bell size={22} />}
       <div style={{ fontWeight: 700, fontSize: 17 }}>{title}</div>
-      <button onClick={onMenu} style={iconBtn}><Menu size={22} /></button>
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        {onMic && <VoiceCaptureButton onResult={onMic} />}
+        <button onClick={onMenu} style={iconBtn}><Menu size={22} /></button>
+      </div>
     </div>
   );
 }
 const iconBtn = { background: "none", border: "none", color: "#fff", cursor: "pointer" };
+
+function VoiceCaptureButton({ onResult }) {
+  const [listening, setListening] = useState(false);
+  const [supported] = useState(() => typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition));
+  function start() {
+    if (!supported) {
+      alert("تشخیص گفتار روی این دستگاه/مرورگر پشتیبانی نمی‌شود. می‌تونی از دکمه سه‌بار لمس صفحه برای ثبت متنی استفاده کنی.");
+      return;
+    }
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new Rec();
+    rec.lang = "fa-IR";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.onstart = () => setListening(true);
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    rec.onresult = (e) => {
+      const transcript = e.results?.[0]?.[0]?.transcript;
+      if (transcript) onResult(transcript);
+    };
+    try { rec.start(); } catch { setListening(false); }
+  }
+  return (
+    <button onClick={start} style={{ ...iconBtn, color: listening ? "#ffd166" : "#fff" }} title="ثبت با صدا">
+      {listening ? <Mic size={20} /> : <Mic size={20} />}
+    </button>
+  );
+}
 
 function BottomNav({ active, setActive, onAdd }) {
   const t = useT();
@@ -294,10 +568,11 @@ function BottomNav({ active, setActive, onAdd }) {
     { key: "operations", label: "عملیات", icon: Grid3x3 },
     { key: "reports", label: "گزارش ها", icon: PieChartIcon },
     { key: "transactions", label: "تراکنش ها", icon: Receipt },
+    { key: "checks", label: "چک ها", icon: FileSpreadsheet },
     { key: "home", label: "خانه", icon: HomeIcon },
   ];
   return (
-    <div style={{ position: "sticky", bottom: 0, background: t.card, borderTop: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "space-around", padding: "8px 4px 10px", zIndex: 20 }}>
+    <div style={{ position: "sticky", bottom: 0, background: t.card, borderTop: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "space-around", padding: "8px 4px calc(env(safe-area-inset-bottom, 0px) + 10px)", zIndex: 20 }}>
       {items.slice(0, 2).map((it) => <NavBtn key={it.key} it={it} active={active} setActive={setActive} />)}
       <button onClick={onAdd} style={{ width: 54, height: 54, borderRadius: "50%", background: BRAND.fab, border: `4px solid ${t.card}`, marginTop: -26, boxShadow: "0 3px 10px rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", cursor: "pointer" }}>
         <Plus size={26} />
@@ -366,6 +641,8 @@ export default function App() {
   const [events, setEvents] = useState([]);
   const [projects, setProjects] = useState([]);
   const [fiscalPeriods, setFiscalPeriods] = useState([]);
+  const [notes, setNotes] = useState([]);
+  const [reminders, setReminders] = useState([]);
 
   const [tab, setTab] = useState("home");
   const [subView, setSubView] = useState(null);
@@ -373,14 +650,30 @@ export default function App() {
   const [prefillTx, setPrefillTx] = useState(null);
   const [open, setOpen] = useState({});
   const [year, setYear] = useState(jalaliYear(new Date()));
+  const [homeDay, setHomeDay] = useState(todayISO());
   const [txFilter, setTxFilter] = useState("all");
   const [txSearch, setTxSearch] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [showNoteModal, setShowNoteModal] = useState(false);
+  const [showReminderModal, setShowReminderModal] = useState(false);
+  const [showCapture, setShowCapture] = useState(false);
+  const [rates, setRates] = useState(null); // { usd: rialsPerUsd, fetchedAt }
+  const tapTimesRef = useRef([]);
+  function handleTripleTap() {
+    const now = Date.now();
+    const recent = [...tapTimesRef.current.filter((tms) => now - tms < 600), now];
+    tapTimesRef.current = recent;
+    if (recent.length >= 3) {
+      tapTimesRef.current = [];
+      setShowCapture(true);
+    }
+  }
 
   const shared = settings.sharedFamily;
 
   const reloadAll = useCallback(async (sh) => {
-    const [a, c, t, b, ln, ck, bl, as, rc, fv, mb, ev, pj, fp] = await Promise.all([
+    const [a, c, t, b, ln, ck, bl, as, rc, fv, mb, ev, pj, fp, nt, rm] = await Promise.all([
       loadKey("hs:accounts", null, sh), loadKey("hs:categories", null, sh),
       loadKey("hs:transactions", null, sh), loadKey("hs:budgets", null, sh),
       loadKey("hs:loans", [], sh), loadKey("hs:checks", [], sh),
@@ -388,6 +681,7 @@ export default function App() {
       loadKey("hs:recurring", [], sh), loadKey("hs:favorites", { categories: [], accounts: [] }, sh),
       loadKey("hs:members", [], sh), loadKey("hs:events", [], sh),
       loadKey("hs:projects", [], sh), loadKey("hs:fiscalPeriods", [], sh),
+      loadKey("hs:notes", [], sh), loadKey("hs:reminders", [], sh),
     ]);
     setAccounts(a || seedAccounts());
     setCategories(c || seedCategories());
@@ -395,6 +689,7 @@ export default function App() {
     setBudgets(b || []);
     setLoans(ln); setChecks(ck); setBills(bl); setAssets(as); setRecurring(rc); setFavorites(fv);
     setMembers(mb); setEvents(ev); setProjects(pj); setFiscalPeriods(fp);
+    setNotes(nt); setReminders(rm);
   }, []);
 
   useEffect(() => {
@@ -422,6 +717,8 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey("hs:events", events, shared); }, [events, loaded, shared]);
   useEffect(() => { if (loaded) saveKey("hs:projects", projects, shared); }, [projects, loaded, shared]);
   useEffect(() => { if (loaded) saveKey("hs:fiscalPeriods", fiscalPeriods, shared); }, [fiscalPeriods, loaded, shared]);
+  useEffect(() => { if (loaded) saveKey("hs:notes", notes, shared); }, [notes, loaded, shared]);
+  useEffect(() => { if (loaded) saveKey("hs:reminders", reminders, shared); }, [reminders, loaded, shared]);
 
   // process recurring templates once after load
   useEffect(() => {
@@ -523,7 +820,28 @@ export default function App() {
     });
   }
 
-  const backupState = { accounts, categories, transactions, budgets, loans, checks, bills, assets, recurring, favorites, settings };
+  // Live currency rates: best-effort fetch from a free, no-key, CORS-enabled endpoint.
+  // Works when the phone has internet; if the fetch fails (offline, endpoint down,
+  // or blocked network) we fall back to whatever the user entered manually in Settings.
+  async function fetchRates() {
+    try {
+      const res = await fetch("https://open.er-api.com/v6/latest/USD");
+      const data = await res.json();
+      const irr = data?.rates?.IRR;
+      if (irr) {
+        setRates({ usd: irr, fetchedAt: new Date().toISOString(), source: "live" });
+        return;
+      }
+      throw new Error("no IRR rate in response");
+    } catch (e) {
+      const manual = Number(settings.manualUsdRate);
+      if (manual > 0) setRates({ usd: manual, fetchedAt: new Date().toISOString(), source: "manual" });
+      else setRates({ usd: null, fetchedAt: new Date().toISOString(), source: "failed" });
+    }
+  }
+  useEffect(() => { if (loaded) fetchRates(); /* eslint-disable-next-line */ }, [loaded]);
+
+  const backupState = { accounts, categories, transactions, budgets, loans, checks, bills, assets, recurring, favorites, settings, members, events, projects, fiscalPeriods, notes, reminders };
   function exportBackup() {
     const blob = new Blob([JSON.stringify(backupState, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -547,6 +865,13 @@ export default function App() {
         if (data.assets) setAssets(data.assets);
         if (data.recurring) setRecurring(data.recurring);
         if (data.favorites) setFavorites(data.favorites);
+        if (data.members) setMembers(data.members);
+        if (data.events) setEvents(data.events);
+        if (data.projects) setProjects(data.projects);
+        if (data.fiscalPeriods) setFiscalPeriods(data.fiscalPeriods);
+        if (data.notes) setNotes(data.notes);
+        if (data.reminders) setReminders(data.reminders);
+        if (data.settings) setSettings((s) => ({ ...s, ...data.settings }));
         alert("بازیابی اطلاعات با موفقیت انجام شد");
       } catch { alert("فایل پشتیبان نامعتبر است"); }
     };
@@ -590,11 +915,12 @@ export default function App() {
     transactions, catById, accById, totalBalance, totalAssets,
     members, setMembers, events, setEvents, projects, setProjects,
     fiscalPeriods, setFiscalPeriods, openWithPrefill,
+    notes, setNotes, reminders, setReminders, rates, fetchRates,
   };
 
   return (
     <ThemeCtx.Provider value={t}>
-      <div dir="rtl" style={{ fontFamily: FONT, background: t.bg, color: t.text, minHeight: "100vh", maxWidth: 480, margin: "0 auto", display: "flex", flexDirection: "column", position: "relative", boxShadow: "0 0 30px rgba(0,0,0,0.08)" }}>
+      <div dir="rtl" onClick={handleTripleTap} style={{ fontFamily: FONT, background: t.bg, color: t.text, minHeight: "100vh", maxWidth: 480, margin: "0 auto", display: "flex", flexDirection: "column", position: "relative", boxShadow: "0 0 30px rgba(0,0,0,0.08)", zoom: settings.fontScale || 1 }}>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap');
           * { box-sizing: border-box; }
@@ -607,7 +933,8 @@ export default function App() {
           <SubViewRouter subView={subView} onBack={() => setSubView(null)} ctx={ctx} />
         ) : (
           <>
-            <Header title={settings.profile?.name || "alireza shadfar"} onMenu={() => setMenuOpen(true)} />
+            <Header title={settings.profile?.name || "alireza shadfar"} onMenu={() => setMenuOpen(true)}
+              onMic={(transcript) => openWithPrefill(parseBankSms(transcript))} />
             <div style={{ flex: 1, overflowY: "auto", paddingBottom: 8 }}>
               {tab === "home" && (
                 <HomeView
@@ -616,11 +943,14 @@ export default function App() {
                   open={open} toggle={toggle}
                   accounts={accounts} accountBalance={accountBalance}
                   expenseByCategory={expenseByCategory} incomeByCategory={incomeByCategory}
-                  budgets={budgets} categories={categories} transactions={yearTx}
+                  budgets={budgets} categories={categories} transactions={yearTx} allTransactions={transactions}
                   bills={bills} loans={loans} checks={checks} assets={assets} totalAssets={totalAssets}
                   openAccounts={() => setSubView("accounts")} openBudgets={() => setSubView("budgets")}
                   openBills={() => setSubView("bills")} openLoans={() => setSubView("loans")}
                   openChecks={() => setSubView("checks")} openAssets={() => setSubView("assets")}
+                  homeDay={homeDay} setHomeDay={setHomeDay} catById={catById}
+                  settings={settings} setSettings={setSettings} rates={rates} fetchRates={fetchRates}
+                  onNote={() => setShowNoteModal(true)} onReminder={() => setShowReminderModal(true)}
                 />
               )}
               {tab === "transactions" && (
@@ -631,6 +961,7 @@ export default function App() {
                 />
               )}
               {tab === "operations" && <OperationsView setSubView={setSubView} onAdd={() => setShowAdd(true)} />}
+              {tab === "checks" && <ChecksManager checks={checks} setChecks={setChecks} />}
               {tab === "reports" && (
                 <ReportsView
                   expenseByCategory={expenseByCategory} incomeByCategory={incomeByCategory}
@@ -638,11 +969,40 @@ export default function App() {
                   accounts={accounts} accountBalance={accountBalance}
                   netWorthTrend={netWorthTrend} exportExcel={exportExcel}
                   expenseByMember={expenseByMember} expenseByEvent={expenseByEvent} expenseByProject={expenseByProject}
+                  checks={checks} currency={settings.currency} usdRate={rates?.usd}
                 />
               )}
             </div>
-            <BottomNav active={tab} setActive={setTab} onAdd={() => { setPrefillTx(null); setShowAdd(true); }} />
+            <BottomNav active={tab} setActive={setTab} onAdd={() => setShowQuickAdd(true)} />
           </>
+        )}
+
+        {showQuickAdd && (
+          <QuickAddSheet
+            onClose={() => setShowQuickAdd(false)}
+            onPick={(type) => {
+              setShowQuickAdd(false);
+              if (type === "check") { setTab("checks"); return; }
+              setPrefillTx(type === "expense" ? { type: "expense" } : type === "income" ? { type: "income" } : null);
+              setShowAdd(true);
+            }}
+          />
+        )}
+
+        {showNoteModal && (
+          <SimpleTextModal title="یادداشت جدید" placeholder="یادداشتت رو بنویس..."
+            onClose={() => setShowNoteModal(false)}
+            onSubmit={(text) => { setNotes((p) => [{ id: uid(), text, date: todayISO(), createdAt: new Date().toISOString() }, ...p]); setShowNoteModal(false); }} />
+        )}
+        {showReminderModal && (
+          <ReminderQuickModal onClose={() => setShowReminderModal(false)}
+            onSubmit={(r) => { setReminders((p) => [{ id: uid(), ...r }, ...p]); setShowReminderModal(false); }} />
+        )}
+        {showCapture && (
+          <SmartCaptureOverlay
+            onClose={() => setShowCapture(false)}
+            onParsed={(data) => { setShowCapture(false); openWithPrefill(data); }}
+          />
         )}
 
         {showAdd && (
@@ -666,23 +1026,126 @@ export default function App() {
 function HomeView({
   year, setYear, totalIncomeYear, totalExpenseYear, gaugeMax, open, toggle,
   accounts, accountBalance, expenseByCategory, incomeByCategory, budgets, categories,
-  transactions, bills, loans, checks, assets, totalAssets,
-  openAccounts, openBudgets, openBills, openLoans, openChecks, openAssets
+  transactions, allTransactions, bills, loans, checks, assets, totalAssets,
+  openAccounts, openBudgets, openBills, openLoans, openChecks, openAssets,
+  homeDay, setHomeDay, catById, settings, setSettings, rates, fetchRates, onNote, onReminder
 }) {
   const t = useT();
   const banks = accounts.filter((a) => a.type === "bank");
   const funds = accounts.filter((a) => a.type === "fund");
-  const cards = accounts.filter((a) => a.type === "card");
+  const cardAccs = accounts.filter((a) => a.type === "card");
   const net = totalIncomeYear - totalExpenseYear;
   const upcomingBills = bills.filter((b) => !b.paid && daysUntil(b.dueDate) <= 5).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  const upcomingChecks = checks.filter((c) => c.status === "pending" && daysUntil(c.dueDate) <= 7).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const upcomingChecks = checks.filter((c) => c.status === "pending" && daysUntil(c.dueDate) <= (settings.checkReminderDays || 7)).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const currency = settings.currency, usdRate = rates?.usd;
+  const layout = settings.homeLayout || "cards";
+  const sectionOrder = (settings.homeSections && settings.homeSections.length ? settings.homeSections : DEFAULT_HOME_SECTIONS).filter((s) => s.visible);
+
+  const SECTION_META = {
+    shortcut: { color: BRAND.mauve, title: "میانبر تراکنش ها", icon: <ArrowLeftRight size={20} /> },
+    expense: { color: BRAND.header, title: "هزینه ها", icon: <TrendingDown size={20} /> },
+    income: { color: BRAND.darkgreen, title: "درآمدها", icon: <TrendingUp size={20} /> },
+    banks: { color: BRAND.violet, title: "بانک ها و کارت ها", icon: <Landmark size={20} /> },
+    funds: { color: BRAND.teal, title: "صندوق ها", icon: <Save size={20} /> },
+    balrep: { color: BRAND.gold, title: "گزارش مانده حساب ها", icon: <FileSpreadsheet size={20} /> },
+    budget: { color: BRAND.green, title: "بودجه بندی", icon: <Target size={20} /> },
+    loanchk: { color: BRAND.orange, title: "وام ها و چک ها", icon: <Bank size={20} /> },
+    bills: { color: BRAND.crimson, title: "یادآوری قبض ها", icon: <BellRing size={20} /> },
+  };
+
+  function sectionBody(key) {
+    switch (key) {
+      case "shortcut":
+        return allTransactions.slice(0, 5).length === 0 ? <EmptyRow text="هنوز تراکنشی ثبت نشده" /> : allTransactions.slice(0, 5).map((tx) => (
+          <Row key={tx.id} title={categories.find((c) => c.id === tx.categoryId)?.name || (tx.type === "transfer" ? "انتقال وجه" : "—")}
+            subtitle={faLongDate(new Date(tx.date))} value={formatMoney(tx.amount, currency, usdRate)}
+            valueColor={tx.type === "expense" ? BRAND.crimson : tx.type === "income" ? BRAND.darkgreen : BRAND.violet} />
+        ));
+      case "expense":
+        return expenseByCategory.length === 0 ? <EmptyRow text="هزینه‌ای ثبت نشده" /> : expenseByCategory.map((e) => <Row key={e.catId} title={e.name} value={formatMoney(e.amount, currency, usdRate)} valueColor={BRAND.crimson} />);
+      case "income":
+        return incomeByCategory.length === 0 ? <EmptyRow text="درآمدی ثبت نشده" /> : incomeByCategory.map((e) => <Row key={e.catId} title={e.name} value={formatMoney(e.amount, currency, usdRate)} valueColor={BRAND.darkgreen} />);
+      case "banks":
+        return (<>
+          {[...banks, ...cardAccs].length === 0 && <EmptyRow text="حسابی ثبت نشده" />}
+          {[...banks, ...cardAccs].map((a) => (
+            <Row key={a.id} title={a.name} subtitle={a.type === "card" ? "کارت" : "بانک"} value={formatMoney(accountBalance(a.id), currency, usdRate)}
+              valueColor={accountBalance(a.id) >= 0 ? t.text : BRAND.crimson} />
+          ))}
+          <AddLink text="+ مدیریت حساب‌ها و کارت‌ها" onClick={openAccounts} />
+        </>);
+      case "funds":
+        return funds.length === 0 ? <EmptyRow text="صندوقی ثبت نشده" /> : funds.map((a) => <Row key={a.id} title={a.name} value={formatMoney(accountBalance(a.id), currency, usdRate)} valueColor={accountBalance(a.id) >= 0 ? t.text : BRAND.crimson} />);
+      case "balrep":
+        return accounts.map((a) => (
+          <Row key={a.id} title={a.name} subtitle={a.type === "bank" ? "بانک" : a.type === "card" ? "کارت" : "صندوق"}
+            value={formatMoney(accountBalance(a.id), currency, usdRate)} valueColor={accountBalance(a.id) >= 0 ? BRAND.darkgreen : BRAND.crimson} />
+        ));
+      case "budget":
+        return (<>
+          {budgets.length === 0 && <EmptyRow text="بودجه‌ای تعریف نشده" />}
+          {budgets.map((b) => {
+            const cat = categories.find((c) => c.id === b.categoryId);
+            const spent = expenseByCategory.find((e) => e.catId === b.categoryId)?.amount || 0;
+            const pct = Math.min(100, Math.round((spent / (b.amount || 1)) * 100));
+            return (
+              <div key={b.id} style={{ padding: "10px 4px", borderBottom: `1px solid ${t.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>
+                  <span>{cat?.name || "—"}</span>
+                  <span style={{ color: pct >= 100 ? BRAND.crimson : t.sub }}>{toFaInt(pct)}٪ — {toFaInt(spent)}/{toFaInt(b.amount)}</span>
+                </div>
+                <div style={{ height: 7, background: t.border, borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ width: `${pct}%`, height: "100%", background: pct >= 100 ? BRAND.crimson : BRAND.green }} />
+                </div>
+              </div>
+            );
+          })}
+          <AddLink text="+ مدیریت بودجه‌بندی" onClick={openBudgets} />
+        </>);
+      case "loanchk":
+        return (<>
+          {loans.length === 0 && checks.length === 0 && <EmptyRow text="موردی ثبت نشده" />}
+          {loans.map((l) => (
+            <Row key={l.id} title={l.title} subtitle="وام" value={`${toFaInt(l.principal - (l.paidCount || 0) * l.monthlyPayment)} ریال باقی‌مانده`} valueColor={BRAND.crimson} />
+          ))}
+          {checks.filter((c) => c.status === "pending").map((c) => (
+            <Row key={c.id} title={`${c.payee} (${c.type === "received" ? "دریافتی" : "پرداختی"})`} subtitle={faLongDate(new Date(c.dueDate))} value={formatMoney(c.amount, currency, usdRate)} />
+          ))}
+          <div style={{ display: "flex", gap: 14, justifyContent: "center", marginTop: 4 }}>
+            <AddLink text="+ وام‌ها" onClick={openLoans} />
+            <AddLink text="+ چک‌ها" onClick={openChecks} />
+            <AddLink text="+ دارایی‌ها" onClick={openAssets} />
+          </div>
+        </>);
+      case "bills":
+        return (<>
+          {bills.length === 0 && <EmptyRow text="قبضی ثبت نشده" />}
+          {bills.map((b) => (
+            <Row key={b.id} title={b.title} subtitle={faLongDate(new Date(b.dueDate))}
+              value={b.paid ? "پرداخت شده" : `${toFaInt(daysUntil(b.dueDate))} روز`}
+              valueColor={b.paid ? BRAND.darkgreen : daysUntil(b.dueDate) < 0 ? BRAND.crimson : BRAND.orange} />
+          ))}
+          <AddLink text="+ مدیریت قبض‌ها" onClick={openBills} />
+        </>);
+      default: return null;
+    }
+  }
 
   return (
     <div style={{ padding: "18px 16px 8px" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14, marginBottom: 18 }}>
+      <BankCardCarousel accounts={accounts} accountBalance={accountBalance} currency={currency} usdRate={usdRate} />
+      <DateQuickBox onNote={onNote} onReminder={onReminder} />
+      <IncomeExpenseDayWidget day={homeDay} setDay={setHomeDay} transactions={allTransactions} catById={catById} currency={currency} usdRate={usdRate} />
+      <CurrencyRatesStrip rates={rates} fetchRates={fetchRates} />
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14, margin: "18px 0" }}>
         <button onClick={() => setYear((y) => y - 1)} style={navArrowStyle(t)}><ChevronLeft size={16} /></button>
         <div style={{ background: t.card, borderRadius: 20, padding: "6px 18px", fontWeight: 700, color: BRAND.header, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>سال {faDigits(year)}</div>
         <button onClick={() => setYear((y) => y + 1)} style={navArrowStyle(t)}><ChevronRight size={16} /></button>
+        <button onClick={() => setSettings((s) => ({ ...s, homeLayout: layout === "cards" ? "icons" : "cards" }))}
+          style={{ ...navArrowStyle(t), width: "auto", padding: "0 10px", borderRadius: 16, display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+          {layout === "cards" ? <LayoutGrid size={15} /> : <LayoutList size={15} />}
+        </button>
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 8 }}>
@@ -710,95 +1173,63 @@ function HomeView({
         </div>
       )}
 
-      <CollapsibleSection color={BRAND.mauve} title="میانبر تراکنش ها" open={!!open.shortcut} onToggle={() => toggle("shortcut")}>
-        {transactions.slice(0, 5).length === 0 && <EmptyRow text="هنوز تراکنشی ثبت نشده" />}
-        {transactions.slice(0, 5).map((tx) => (
-          <Row key={tx.id} title={categories.find((c) => c.id === tx.categoryId)?.name || (tx.type === "transfer" ? "انتقال وجه" : "—")}
-            subtitle={faLongDate(new Date(tx.date))} value={`${toFaInt(tx.amount)} ریال`}
-            valueColor={tx.type === "expense" ? BRAND.crimson : tx.type === "income" ? BRAND.darkgreen : BRAND.violet} />
-        ))}
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.header} title="هزینه ها" open={!!open.expense} onToggle={() => toggle("expense")}>
-        {expenseByCategory.length === 0 && <EmptyRow text="هزینه‌ای ثبت نشده" />}
-        {expenseByCategory.map((e) => <Row key={e.catId} title={e.name} value={`${toFaInt(e.amount)} ریال`} valueColor={BRAND.crimson} />)}
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.darkgreen} title="درآمدها" open={!!open.income} onToggle={() => toggle("income")}>
-        {incomeByCategory.length === 0 && <EmptyRow text="درآمدی ثبت نشده" />}
-        {incomeByCategory.map((e) => <Row key={e.catId} title={e.name} value={`${toFaInt(e.amount)} ریال`} valueColor={BRAND.darkgreen} />)}
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.violet} title="بانک ها و کارت ها" open={!!open.banks} onToggle={() => toggle("banks")}>
-        {[...banks, ...cards].length === 0 && <EmptyRow text="حسابی ثبت نشده" />}
-        {[...banks, ...cards].map((a) => (
-          <Row key={a.id} title={a.name} subtitle={a.type === "card" ? "کارت" : "بانک"} value={`${toFaInt(accountBalance(a.id))} ریال`}
-            valueColor={accountBalance(a.id) >= 0 ? t.text : BRAND.crimson} />
-        ))}
-        <AddLink text="+ مدیریت حساب‌ها و کارت‌ها" onClick={openAccounts} />
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.teal} title="صندوق ها" open={!!open.funds} onToggle={() => toggle("funds")}>
-        {funds.length === 0 && <EmptyRow text="صندوقی ثبت نشده" />}
-        {funds.map((a) => <Row key={a.id} title={a.name} value={`${toFaInt(accountBalance(a.id))} ریال`} valueColor={accountBalance(a.id) >= 0 ? t.text : BRAND.crimson} />)}
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.gold} title="گزارش مانده حساب ها" open={!!open.balrep} onToggle={() => toggle("balrep")}>
-        {accounts.map((a) => (
-          <Row key={a.id} title={a.name} subtitle={a.type === "bank" ? "بانک" : a.type === "card" ? "کارت" : "صندوق"}
-            value={`${toFaInt(accountBalance(a.id))} ریال`} valueColor={accountBalance(a.id) >= 0 ? BRAND.darkgreen : BRAND.crimson} />
-        ))}
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.green} title="بودجه بندی" open={!!open.budget} onToggle={() => toggle("budget")}>
-        {budgets.length === 0 && <EmptyRow text="بودجه‌ای تعریف نشده" />}
-        {budgets.map((b) => {
-          const cat = categories.find((c) => c.id === b.categoryId);
-          const spent = expenseByCategory.find((e) => e.catId === b.categoryId)?.amount || 0;
-          const pct = Math.min(100, Math.round((spent / (b.amount || 1)) * 100));
+      {layout === "cards" ? (
+        sectionOrder.map(({ key }) => {
+          const m = SECTION_META[key];
+          if (!m) return null;
           return (
-            <div key={b.id} style={{ padding: "10px 4px", borderBottom: `1px solid ${t.border}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>
-                <span>{cat?.name || "—"}</span>
-                <span style={{ color: pct >= 100 ? BRAND.crimson : t.sub }}>{toFaInt(pct)}٪ — {toFaInt(spent)}/{toFaInt(b.amount)}</span>
-              </div>
-              <div style={{ height: 7, background: t.border, borderRadius: 4, overflow: "hidden" }}>
-                <div style={{ width: `${pct}%`, height: "100%", background: pct >= 100 ? BRAND.crimson : BRAND.green }} />
-              </div>
-            </div>
+            <CollapsibleSection key={key} color={m.color} title={m.title} open={!!open[key]} onToggle={() => toggle(key)}>
+              {sectionBody(key)}
+            </CollapsibleSection>
           );
-        })}
-        <AddLink text="+ مدیریت بودجه‌بندی" onClick={openBudgets} />
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.orange} title="وام ها و چک ها" open={!!open.loanchk} onToggle={() => toggle("loanchk")}>
-        {loans.length === 0 && checks.length === 0 && <EmptyRow text="موردی ثبت نشده" />}
-        {loans.map((l) => (
-          <Row key={l.id} title={l.title} subtitle="وام" value={`${toFaInt(l.principal - (l.paidCount || 0) * l.monthlyPayment)} ریال باقی‌مانده`} valueColor={BRAND.crimson} />
-        ))}
-        {checks.filter((c) => c.status === "pending").map((c) => (
-          <Row key={c.id} title={`${c.payee} (${c.type === "received" ? "دریافتی" : "پرداختی"})`} subtitle={faLongDate(new Date(c.dueDate))} value={`${toFaInt(c.amount)} ریال`} />
-        ))}
-        <div style={{ display: "flex", gap: 14, justifyContent: "center", marginTop: 4 }}>
-          <AddLink text="+ وام‌ها" onClick={openLoans} />
-          <AddLink text="+ چک‌ها" onClick={openChecks} />
-          <AddLink text="+ دارایی‌ها" onClick={openAssets} />
+        })
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+          {sectionOrder.map(({ key }) => {
+            const m = SECTION_META[key];
+            if (!m) return null;
+            return (
+              <button key={key} onClick={() => toggle(key)} style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 8, background: t.card, border: "none",
+                borderRadius: 14, padding: "16px 6px", cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.08)"
+              }}>
+                <span style={{ width: 44, height: 44, borderRadius: 12, background: m.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>{m.icon}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: t.text, textAlign: "center" }}>{m.title}</span>
+              </button>
+            );
+          })}
         </div>
-      </CollapsibleSection>
-
-      <CollapsibleSection color={BRAND.crimson} title="یادآوری قبض ها" open={!!open.bills} onToggle={() => toggle("bills")}>
-        {bills.length === 0 && <EmptyRow text="قبضی ثبت نشده" />}
-        {bills.map((b) => (
-          <Row key={b.id} title={b.title} subtitle={faLongDate(new Date(b.dueDate))}
-            value={b.paid ? "پرداخت شده" : `${toFaInt(daysUntil(b.dueDate))} روز`}
-            valueColor={b.paid ? BRAND.darkgreen : daysUntil(b.dueDate) < 0 ? BRAND.crimson : BRAND.orange} />
-        ))}
-        <AddLink text="+ مدیریت قبض‌ها" onClick={openBills} />
-      </CollapsibleSection>
+      )}
+      {layout === "icons" && sectionOrder.map(({ key }) => {
+        const m = SECTION_META[key];
+        if (!m || !open[key]) return null;
+        return (
+          <div key={key} style={{ background: t.card, borderRadius: 14, padding: "10px 14px", marginBottom: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+            <div style={{ fontWeight: 700, color: m.color, fontSize: 13.5, marginBottom: 6 }}>{m.title}</div>
+            {sectionBody(key)}
+          </div>
+        );
+      })}
     </div>
   );
 }
 const navArrowStyle = (t) => ({ width: 30, height: 30, borderRadius: "50%", border: "none", background: t.card, color: BRAND.header, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", cursor: "pointer" });
+
+function CurrencyRatesStrip({ rates, fetchRates }) {
+  const t = useT();
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 16, fontSize: 12, color: t.sub }}>
+      <DollarSign size={13} />
+      {rates?.usd ? (
+        <span>هر دلار ≈ {toFaInt(Math.round(rates.usd))} ریال {rates.source === "manual" ? "(دستی)" : ""}</span>
+      ) : (
+        <span>نرخ ارز در دسترس نیست</span>
+      )}
+      <button onClick={fetchRates} style={{ background: "none", border: "none", cursor: "pointer", color: t.sub, display: "flex" }}><RefreshCw size={13} /></button>
+    </div>
+  );
+}
+
 
 /* ---------------------------------------------------------
    Transactions View
@@ -923,10 +1354,24 @@ function OperationsView({ setSubView, onAdd }) {
    Reports View
 --------------------------------------------------------- */
 const PIE_COLORS = ["#B01E4A", "#6C3FA0", "#4E9AA0", "#A98A3B", "#3E1461", "#1E8449", "#A65475", "#555"];
-function ReportsView({ expenseByCategory, incomeByCategory, totalIncomeYear, totalExpenseYear, accounts, accountBalance, netWorthTrend, exportExcel, expenseByMember, expenseByEvent, expenseByProject }) {
+function ReportsView({ expenseByCategory, incomeByCategory, totalIncomeYear, totalExpenseYear, accounts, accountBalance, netWorthTrend, exportExcel, expenseByMember, expenseByEvent, expenseByProject, checks = [], currency, usdRate }) {
   const st = useStyles();
-  const barData = [{ name: "درآمد", مقدار: totalIncomeYear, fill: BRAND.darkgreen }, { name: "هزینه", مقدار: totalExpenseYear, fill: BRAND.crimson }];
+  const [period, setPeriod] = useState("year");
   const profit = totalIncomeYear - totalExpenseYear;
+  const incomeExpensePie = [
+    { name: "درآمد", amount: totalIncomeYear },
+    { name: "هزینه", amount: totalExpenseYear },
+  ].filter((d) => d.amount > 0);
+
+  const checkStats = useMemo(() => {
+    const pending = checks.filter((c) => c.status === "pending").length;
+    const cashed = checks.filter((c) => c.status === "cashed").length;
+    const bounced = checks.filter((c) => c.status === "bounced").length;
+    const resolved = cashed + bounced;
+    const pct = resolved > 0 ? (cashed / resolved) * 100 : 0;
+    return { pending, cashed, bounced, pct };
+  }, [checks]);
+
   return (
     <div style={{ padding: "16px" }}>
       <div className="no-print" style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -934,11 +1379,22 @@ function ReportsView({ expenseByCategory, incomeByCategory, totalIncomeYear, tot
         <button onClick={() => window.print()} style={{ ...st.primaryBtn, background: "#555", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Printer size={16} /> چاپ / PDF</button>
       </div>
 
+      <div className="no-print" style={{ display: "flex", gap: 6, marginBottom: 18, background: "#f1eef4", borderRadius: 10, padding: 4 }}>
+        {[{ k: "day", l: "روزانه" }, { k: "week", l: "هفتگی" }, { k: "month", l: "ماهیانه" }, { k: "year", l: "سالیانه" }].map((p) => (
+          <button key={p.k} onClick={() => setPeriod(p.k)} style={{ flex: 1, padding: "7px 4px", borderRadius: 7, border: "none", cursor: "pointer", background: period === p.k ? BRAND.header : "transparent", color: period === p.k ? "#fff" : "#3E1461", fontWeight: 700, fontSize: 12 }}>{p.l}</button>
+        ))}
+      </div>
+      {period !== "year" && (
+        <div style={{ fontSize: 11.5, color: "#8a8194", marginBottom: 14, textAlign: "center" }}>
+          توجه: نمودارهای زیر همچنان بر اساس سال انتخابی در صفحه‌ی خانه محاسبه شده‌اند؛ فیلتر {period === "day" ? "روزانه" : period === "week" ? "هفتگی" : "ماهیانه"} روی نمای «روند دارایی خالص» و ویجت خانه اعمال می‌شود.
+        </div>
+      )}
+
       <SectionTitle text="سود و زیان سالانه" />
       <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
-        <Row title="مجموع درآمد" value={`${toFaInt(totalIncomeYear)} ریال`} valueColor={BRAND.darkgreen} chevron={null} />
-        <Row title="مجموع هزینه" value={`${toFaInt(totalExpenseYear)} ریال`} valueColor={BRAND.crimson} chevron={null} />
-        <Row title="سود / زیان خالص" value={`${toFaInt(Math.abs(profit))} ریال`} valueColor={profit >= 0 ? BRAND.darkgreen : BRAND.crimson} chevron={null} />
+        <Row title="مجموع درآمد" value={formatMoney(totalIncomeYear, currency, usdRate)} valueColor={BRAND.darkgreen} chevron={null} />
+        <Row title="مجموع هزینه" value={formatMoney(totalExpenseYear, currency, usdRate)} valueColor={BRAND.crimson} chevron={null} />
+        <Row title="سود / زیان خالص" value={formatMoney(Math.abs(profit), currency, usdRate)} valueColor={profit >= 0 ? BRAND.darkgreen : BRAND.crimson} chevron={null} />
       </div>
 
       <SectionTitle text="روند دارایی خالص (۸ ماه اخیر)" />
@@ -956,40 +1412,48 @@ function ReportsView({ expenseByCategory, incomeByCategory, totalIncomeYear, tot
 
       <SectionTitle text="درآمد و هزینه" />
       <div style={{ ...st.card, padding: 12, marginBottom: 18 }}>
-        <ResponsiveContainer width="100%" height={180}>
-          <BarChart data={barData}>
-            <XAxis dataKey="name" tick={{ fontFamily: FONT, fontSize: 12 }} />
-            <YAxis tick={{ fontFamily: FONT, fontSize: 10 }} width={44} />
-            <Tooltip formatter={(v) => toFaInt(v)} contentStyle={{ fontFamily: FONT, direction: "rtl" }} />
-            <Bar dataKey="مقدار" radius={[6, 6, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
+        <ExplodingPie data={incomeExpensePie} currency={currency} usdRate={usdRate} />
       </div>
 
       <SectionTitle text="توزیع هزینه‌ها بر اساس دسته" />
       <div style={{ ...st.card, padding: 12, marginBottom: 18 }}>
-        {expenseByCategory.length === 0 ? <EmptyRow text="داده‌ای برای نمایش نیست" /> : (
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie data={expenseByCategory} dataKey="amount" nameKey="name" outerRadius={80} label={(e) => e.name}>
-                {expenseByCategory.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
-              </Pie>
-              <Tooltip formatter={(v) => toFaInt(v)} contentStyle={{ fontFamily: FONT, direction: "rtl" }} />
-            </PieChart>
-          </ResponsiveContainer>
+        <ExplodingPie data={expenseByCategory.map((e) => ({ name: e.name, amount: e.amount }))} currency={currency} usdRate={usdRate} />
+      </div>
+
+      <SectionTitle text="گزارش چک‌ها" />
+      <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 10 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: BRAND.gold }}>{toFaInt(checkStats.pending)}</div>
+            <div style={{ fontSize: 11.5, color: "#8a8194" }}>در جریان وصول</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: BRAND.darkgreen }}>{toFaInt(checkStats.cashed)}</div>
+            <div style={{ fontSize: 11.5, color: "#8a8194" }}>وصول شده</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: BRAND.crimson }}>{toFaInt(checkStats.bounced)}</div>
+            <div style={{ fontSize: 11.5, color: "#8a8194" }}>برگشت خورده</div>
+          </div>
+        </div>
+        {(checkStats.cashed + checkStats.bounced) > 0 && (
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <GaugeSpeedometer pct={checkStats.pct} label="نسبت چک‌های وصول‌شده به کل تسویه‌شده‌ها" />
+          </div>
         )}
+        {checks.length === 0 && <EmptyRow text="چکی ثبت نشده" />}
       </div>
 
       <SectionTitle text="گزارش مانده حساب‌ها" />
       <div style={{ ...st.card, padding: "4px 12px", marginBottom: expenseByMember?.length || expenseByEvent?.length || expenseByProject?.length ? 18 : 0 }}>
-        {accounts.map((a) => <Row key={a.id} title={a.name} subtitle={a.type === "bank" ? "بانک" : a.type === "card" ? "کارت" : "صندوق"} value={`${toFaInt(accountBalance(a.id))} ریال`} valueColor={accountBalance(a.id) >= 0 ? BRAND.darkgreen : BRAND.crimson} chevron={null} />)}
+        {accounts.map((a) => <Row key={a.id} title={a.name} subtitle={a.type === "bank" ? "بانک" : a.type === "card" ? "کارت" : "صندوق"} value={formatMoney(accountBalance(a.id), currency, usdRate)} valueColor={accountBalance(a.id) >= 0 ? BRAND.darkgreen : BRAND.crimson} chevron={null} />)}
       </div>
 
       {expenseByMember?.length > 0 && (
         <>
           <SectionTitle text="گزارش هزینه به‌تفکیک اعضای خانواده" />
           <div style={{ ...st.card, padding: "4px 12px", marginBottom: 18 }}>
-            {expenseByMember.map((m) => <Row key={m.id} title={m.name} value={`${toFaInt(m.amount)} ریال`} valueColor={BRAND.crimson} chevron={null} />)}
+            {expenseByMember.map((m) => <Row key={m.id} title={m.name} value={formatMoney(m.amount, currency, usdRate)} valueColor={BRAND.crimson} chevron={null} />)}
           </div>
         </>
       )}
@@ -997,7 +1461,7 @@ function ReportsView({ expenseByCategory, incomeByCategory, totalIncomeYear, tot
         <>
           <SectionTitle text="گزارش هزینه به‌تفکیک رویداد" />
           <div style={{ ...st.card, padding: "4px 12px", marginBottom: 18 }}>
-            {expenseByEvent.map((m) => <Row key={m.id} title={m.name} value={`${toFaInt(m.amount)} ریال`} valueColor={BRAND.crimson} chevron={null} />)}
+            {expenseByEvent.map((m) => <Row key={m.id} title={m.name} value={formatMoney(m.amount, currency, usdRate)} valueColor={BRAND.crimson} chevron={null} />)}
           </div>
         </>
       )}
@@ -1005,7 +1469,7 @@ function ReportsView({ expenseByCategory, incomeByCategory, totalIncomeYear, tot
         <>
           <SectionTitle text="گزارش هزینه به‌تفکیک پروژه" />
           <div style={{ ...st.card, padding: "4px 12px" }}>
-            {expenseByProject.map((m) => <Row key={m.id} title={m.name} value={`${toFaInt(m.amount)} ریال`} valueColor={BRAND.crimson} chevron={null} />)}
+            {expenseByProject.map((m) => <Row key={m.id} title={m.name} value={formatMoney(m.amount, currency, usdRate)} valueColor={BRAND.crimson} chevron={null} />)}
           </div>
         </>
       )}
@@ -1047,6 +1511,7 @@ function SubViewRouter({ subView, onBack, ctx }) {
 function AccountsManager({ accounts, addAccount, deleteAccount, accountBalance, favorites, toggleFavorite }) {
   const st = useStyles();
   const [name, setName] = useState(""); const [type, setType] = useState("bank"); const [initial, setInitial] = useState("");
+  const [last4, setLast4] = useState("");
   return (
     <div>
       <div style={{ ...st.card, padding: 14, marginBottom: 16 }}>
@@ -1058,7 +1523,10 @@ function AccountsManager({ accounts, addAccount, deleteAccount, accountBalance, 
         </div>
         <input placeholder="نام حساب" value={name} onChange={(e) => setName(e.target.value)} style={st.input} />
         <input placeholder="موجودی اولیه (ریال)" value={initial} onChange={(e) => setInitial(e.target.value.replace(/[^0-9]/g, ""))} style={st.input} inputMode="numeric" />
-        <button onClick={() => { if (!name.trim()) return; addAccount({ name: name.trim(), type, initial: Number(initial || 0) }); setName(""); setInitial(""); }} style={st.primaryBtn}>افزودن</button>
+        {(type === "bank" || type === "card") && (
+          <input placeholder="۴ رقم آخر شماره کارت (اختیاری)" value={last4} onChange={(e) => setLast4(e.target.value.replace(/[^0-9]/g, "").slice(0, 4))} style={st.input} inputMode="numeric" />
+        )}
+        <button onClick={() => { if (!name.trim()) return; addAccount({ name: name.trim(), type, initial: Number(initial || 0), cardNumberLast4: last4 || undefined }); setName(""); setInitial(""); setLast4(""); }} style={st.primaryBtn}>افزودن</button>
       </div>
       <div style={{ ...st.card, padding: "4px 12px" }}>
         {accounts.length === 0 && <EmptyRow text="حسابی ثبت نشده" />}
@@ -1615,6 +2083,55 @@ function SettingsView({ settings, setSettings, exportBackup, importBackup }) {
           chevron={null} />
       </div>
 
+      <SectionTitle text="اندازه فونت" />
+      <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[{ v: 0.9, l: "کوچک" }, { v: 1, l: "معمولی" }, { v: 1.15, l: "بزرگ" }, { v: 1.3, l: "خیلی بزرگ" }].map((o) => (
+            <button key={o.v} onClick={() => setSettings((s) => ({ ...s, fontScale: o.v }))} style={pillStyle(settings.fontScale === o.v)}>{o.l}</button>
+          ))}
+        </div>
+      </div>
+
+      <SectionTitle text="تقویم و واحد پول" />
+      <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
+        <div style={{ fontSize: 12, color: "#8a8194", marginBottom: 8 }}>تقویم</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button onClick={() => setSettings((s) => ({ ...s, calendarMode: "jalali" }))} style={pillStyle(settings.calendarMode !== "gregorian")}>شمسی</button>
+          <button onClick={() => setSettings((s) => ({ ...s, calendarMode: "gregorian" }))} style={pillStyle(settings.calendarMode === "gregorian")}>میلادی</button>
+        </div>
+        <div style={{ fontSize: 11.5, color: "#8a8194", marginBottom: 14 }}>در این نسخه فقط قالب تاریخ تغییر می‌کند؛ متن رابط کاربری همچنان فارسی می‌ماند.</div>
+        <div style={{ fontSize: 12, color: "#8a8194", marginBottom: 8 }}>واحد نمایش پول</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <button onClick={() => setSettings((s) => ({ ...s, currency: "rial" }))} style={pillStyle(settings.currency === "rial")}>ریال</button>
+          <button onClick={() => setSettings((s) => ({ ...s, currency: "toman" }))} style={pillStyle(settings.currency === "toman")}>تومان</button>
+          <button onClick={() => setSettings((s) => ({ ...s, currency: "usd" }))} style={pillStyle(settings.currency === "usd")}>دلار</button>
+        </div>
+        {settings.currency === "usd" && (
+          <>
+            <div style={{ fontSize: 11.5, color: "#8a8194", marginBottom: 8 }}>اگر نرخ آنلاین در دسترس نبود، نرخ هر دلار به ریال را خودتان وارد کنید:</div>
+            <input placeholder="مثلا 600000" value={settings.manualUsdRate} onChange={(e) => setSettings((s) => ({ ...s, manualUsdRate: e.target.value.replace(/[^0-9]/g, "") }))} style={st.input} inputMode="numeric" />
+          </>
+        )}
+      </div>
+
+      <SectionTitle text="یادآوری‌ها و اعلان‌ها" />
+      <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
+        <label style={st.label}>هشدار سررسید چک چند روز قبل؟</label>
+        <input value={settings.checkReminderDays} onChange={(e) => setSettings((s) => ({ ...s, checkReminderDays: Number(e.target.value.replace(/[^0-9]/g, "") || 0) }))} style={st.input} inputMode="numeric" />
+        <Row title="اعلان تشخیص پیامک بانکی" leftIcon={<Bell size={16} />} leftColor={BRAND.orange}
+          extra={<button onClick={() => setSettings((s) => ({ ...s, smsNotif: !s.smsNotif }))} style={{ background: settings.smsNotif ? BRAND.green : "#aaa", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>{settings.smsNotif ? "فعال" : "غیرفعال"}</button>}
+          chevron={null} />
+        <div style={{ fontSize: 11.5, color: "#8a8194", marginTop: 6 }}>چون خواندن خودکار پیامک نیازمند مجوز بومی اندرویده، این گزینه فعلاً فقط برای آماده بودن تنظیمات وقتی به APK وصل بشه رزرو شده؛ ابزار «پیامک بانکی» در بخش عملیات همین حالا هم با Paste کردن متن کار می‌کند.</div>
+      </div>
+
+      <SectionTitle text="هوش مصنوعی (اختیاری)" />
+      <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
+        <div style={{ fontSize: 11.5, color: "#8a8194", marginBottom: 10 }}>
+          تشخیص هوشمند تراکنش از روی متن/صدا همین حالا به‌صورت محلی (بدون نیاز به کلید) کار می‌کند. اگر کلید API خودتان (مثلاً از Anthropic) را اینجا وارد کنید، تلاش می‌شود برای دقت بیشتر از آن استفاده شود — ولی چون تماس مستقیم از داخل اپ به سرورهای AI معمولاً با محدودیت CORS مواجه می‌شود، ممکن است نیاز به یک سرور واسط کوچک داشته باشید تا کاملاً قابل‌اعتماد شود.
+        </div>
+        <input placeholder="کلید API (اختیاری)" value={settings.aiApiKey} onChange={(e) => setSettings((s) => ({ ...s, aiApiKey: e.target.value }))} style={st.input} />
+      </div>
+
       <SectionTitle text="امنیت" />
       <div style={{ ...st.card, padding: 14, marginBottom: 18 }}>
         <div style={{ fontSize: 12.5, color: "#8a8194", marginBottom: 10 }}>قفل با اثر انگشت در این محیط پشتیبانی نمی‌شود؛ به‌جای آن یک رمز عددی تنظیم کنید.</div>
@@ -1640,21 +2157,185 @@ function SettingsView({ settings, setSettings, exportBackup, importBackup }) {
       </div>
 
       <SectionTitle text="درباره همگام‌سازی با Google Drive" />
-      <div style={{ ...st.card, padding: 14, fontSize: 12.5, color: "#8a8194" }}>
+      <div style={{ ...st.card, padding: 14, marginBottom: 18, fontSize: 12.5, color: "#8a8194" }}>
         اتصال مستقیم به Google Drive نیازمند ورود واقعی به حساب گوگل است که در این محیط در دسترس نیست. برای انتقال اطلاعات بین دستگاه‌ها از «دریافت فایل پشتیبان» استفاده کنید و همان فایل را در Drive خودتان نگه دارید یا در دستگاه دیگر «بازیابی» کنید.
+      </div>
+
+      <SectionTitle text="شخصی‌سازی نمای صفحه اول" />
+      <div style={{ ...st.card, padding: "8px 12px", marginBottom: 18 }}>
+        <div style={{ fontSize: 11.5, color: "#8a8194", padding: "6px 4px 10px" }}>هر بخش را می‌توانید نمایش/مخفی کنید یا با فلش‌ها ترتیبش را عوض کنید.</div>
+        {(settings.homeSections || DEFAULT_HOME_SECTIONS).map((sec, i, arr) => {
+          const meta = HOME_SECTION_LABELS[sec.key] || sec.key;
+          function move(dir) {
+            const idx = i + dir;
+            if (idx < 0 || idx >= arr.length) return;
+            const copy = [...arr];
+            [copy[i], copy[idx]] = [copy[idx], copy[i]];
+            setSettings((s) => ({ ...s, homeSections: copy }));
+          }
+          return (
+            <div key={sec.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 4px", borderBottom: "1px solid #f0eef3" }}>
+              <span style={{ fontSize: 13, fontWeight: 600, opacity: sec.visible ? 1 : 0.4 }}>{meta}</span>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button onClick={() => move(-1)} style={miniBtn}><ArrowUp size={13} /></button>
+                <button onClick={() => move(1)} style={miniBtn}><ArrowDown size={13} /></button>
+                <button onClick={() => setSettings((s) => ({ ...s, homeSections: arr.map((x) => x.key === sec.key ? { ...x, visible: !x.visible } : x) }))}
+                  style={{ ...miniBtn, background: sec.visible ? BRAND.green : "#aaa", color: "#fff" }}>
+                  {sec.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <SectionTitle text="آموزش" />
+      <div style={{ ...st.card, padding: 14, marginBottom: 18, fontSize: 13, lineHeight: 2, color: t.text }}>
+        <div>• برای ثبت سریع تراکنش، دکمه‌ی سبز + پایین صفحه را بزن.</div>
+        <div>• سه‌بار پشت‌سرهم روی هر جای صفحه بزن تا کادر «ثبت سریع» باز شود؛ هرچی تایپ کنی خودش تشخیص می‌ده هزینه بوده یا درآمد.</div>
+        <div>• آیکون میکروفون بالای صفحه برای ثبت با صدا است (اگر گوشی‌ات پشتیبانی کند).</div>
+        <div>• روی کارت‌های بانکی بالای صفحه چپ‌وراست بکش تا همه‌ی حساب‌هایت را ببینی.</div>
+        <div>• از «شخصی‌سازی نمای صفحه اول» بالاتر همین صفحه، می‌توانی ترتیب و نمایش بخش‌های خانه را عوض کنی.</div>
+      </div>
+
+      <SectionTitle text="ارسال برنامه به دیگران" />
+      <div style={{ ...st.card, padding: 14 }}>
+        <button
+          onClick={async () => {
+            const text = "برنامه حسابداری Rexa رو امتحان کن!";
+            if (navigator.share) { try { await navigator.share({ title: "Rexa", text }); } catch {} }
+            else { try { await navigator.clipboard.writeText(text); alert("متن معرفی کپی شد."); } catch { alert(text); } }
+          }}
+          style={{ ...st.primaryBtn, background: BRAND.violet, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+          <Users size={16} /> اشتراک‌گذاری برنامه
+        </button>
+      </div>
+    </div>
+  );
+}
+const miniBtn = { width: 26, height: 26, borderRadius: 7, border: "none", background: "#eee", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" };
+const HOME_SECTION_LABELS = {
+  shortcut: "میانبر تراکنش‌ها", expense: "هزینه‌ها", income: "درآمدها", banks: "بانک‌ها و کارت‌ها",
+  funds: "صندوق‌ها", balrep: "گزارش مانده حساب‌ها", budget: "بودجه‌بندی", loanchk: "وام‌ها و چک‌ها", bills: "یادآوری قبض‌ها",
+};
+
+/* ---------------------------------------------------------
+   Add Transaction Sheet
+--------------------------------------------------------- */
+/* ---------------------------------------------------------
+   Quick-add action sheet (opened from the center + button)
+--------------------------------------------------------- */
+function QuickAddSheet({ onClose, onPick }) {
+  const st = useStyles();
+  const options = [
+    { key: "expense", label: "ثبت هزینه", icon: <TrendingDown size={20} />, color: BRAND.crimson },
+    { key: "income", label: "ثبت درآمد", icon: <TrendingUp size={20} />, color: BRAND.darkgreen },
+    { key: "transfer", label: "میانبر تراکنش", icon: <ArrowLeftRight size={20} />, color: BRAND.violet },
+    { key: "check", label: "ثبت چک", icon: <FileSpreadsheet size={20} />, color: BRAND.gold },
+  ];
+  return (
+    <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "flex-end", zIndex: 55, maxWidth: 480, margin: "0 auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", width: "100%", borderRadius: "18px 18px 0 0", padding: "20px 18px calc(env(safe-area-inset-bottom, 0px) + 20px)" }}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 16, textAlign: "center" }}>چی می‌خوای ثبت کنی؟</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+          {options.map((o) => (
+            <button key={o.key} onClick={() => onPick(o.key)} style={{
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: "18px 8px",
+              borderRadius: 14, border: "none", background: "#f7f5fa", cursor: "pointer"
+            }}>
+              <span style={{ width: 44, height: 44, borderRadius: 12, background: o.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>{o.icon}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: "#241a30" }}>{o.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
 /* ---------------------------------------------------------
-   Add Transaction Sheet
+   Simple text modal (used for the quick "یادداشت" note capture)
 --------------------------------------------------------- */
+function SimpleTextModal({ title, placeholder, onClose, onSubmit }) {
+  const st = useStyles();
+  const [text, setText] = useState("");
+  return (
+    <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "flex-end", zIndex: 55, maxWidth: 480, margin: "0 auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", width: "100%", borderRadius: "18px 18px 0 0", padding: "20px 18px calc(env(safe-area-inset-bottom, 0px) + 20px)" }}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 12 }}>{title}</div>
+        <textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder={placeholder} rows={4}
+          style={{ ...st.input, resize: "vertical", fontFamily: "inherit" }} />
+        <button disabled={!text.trim()} onClick={() => onSubmit(text.trim())} style={{ ...st.primaryBtn, opacity: text.trim() ? 1 : 0.5 }}>ذخیره</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Reminder quick modal
+--------------------------------------------------------- */
+function ReminderQuickModal({ onClose, onSubmit }) {
+  const st = useStyles();
+  const [text, setText] = useState("");
+  const [date, setDate] = useState(todayISO());
+  return (
+    <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "flex-end", zIndex: 55, maxWidth: 480, margin: "0 auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", width: "100%", borderRadius: "18px 18px 0 0", padding: "20px 18px calc(env(safe-area-inset-bottom, 0px) + 20px)" }}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 12 }}>یادآوری جدید</div>
+        <input autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder="مثلا: تماس با بانک" style={st.input} />
+        <label style={st.label}>تاریخ</label>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={st.input} />
+        <button disabled={!text.trim()} onClick={() => onSubmit({ text: text.trim(), date, done: false })} style={{ ...st.primaryBtn, opacity: text.trim() ? 1 : 0.5 }}>ذخیره یادآوری</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Smart capture overlay — opened by triple-tap anywhere on the
+   screen. Semi-transparent so the page behind stays visible.
+   Text is parsed locally (same engine as the SMS/voice parser).
+--------------------------------------------------------- */
+function SmartCaptureOverlay({ onClose, onParsed }) {
+  const st = useStyles();
+  const [text, setText] = useState("");
+  const parsed = text.trim() ? parseBankSms(text) : null;
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,10,30,0.4)", backdropFilter: "blur(2px)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "88%", maxWidth: 380, background: "rgba(255,255,255,0.92)", borderRadius: 18, padding: 18,
+        boxShadow: "0 8px 30px rgba(0,0,0,0.3)"
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 14, marginBottom: 10, color: BRAND.header }}>
+          <Sparkles size={17} /> ثبت سریع
+        </div>
+        <textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} rows={3}
+          placeholder="بنویس چی خرج شد یا چی دریافت کردی..." style={{ ...st.input, resize: "vertical", fontFamily: "inherit", background: "rgba(255,255,255,0.7)" }} />
+        {parsed && (
+          <div style={{ fontSize: 12, color: "#6a6275", marginBottom: 10 }}>
+            تشخیص: {parsed.amount ? `${toFaInt(parsed.amount)} ریال` : "مبلغی پیدا نشد"} — {parsed.type === "income" ? "دریافت" : "پرداخت"}{parsed.categoryHint ? ` — ${parsed.categoryHint}` : ""}
+          </div>
+        )}
+        <button disabled={!parsed?.amount} onClick={() => onParsed(parsed)} style={{ ...st.primaryBtn, opacity: parsed?.amount ? 1 : 0.5 }}>ادامه ثبت</button>
+      </div>
+    </div>
+  );
+}
+
 function AddTransactionSheet({ accounts, categories, favorites, members = [], events = [], projects = [], initial, onClose, onSubmit }) {
   const st = useStyles();
   const [type, setType] = useState(initial?.type || "expense");
   const [amount, setAmount] = useState(initial?.amount ? String(initial.amount) : "");
-  const [categoryId, setCategoryId] = useState("");
+  const [categoryId, setCategoryId] = useState(() => {
+    if (initial?.categoryHint) {
+      const match = categories.find((c) => c.name === initial.categoryHint && c.kind === (initial.type || "expense"));
+      if (match) return match.id;
+    }
+    return "";
+  });
   const [accountId, setAccountId] = useState(accounts[0]?.id || "");
   const [toAccountId, setToAccountId] = useState(accounts[1]?.id || accounts[0]?.id || "");
   const [date, setDate] = useState(todayISO());
